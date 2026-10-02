@@ -110,4 +110,11 @@ describe('push helpers', () => {
   test('shown quotes arguments a shell would split', async () => {
     expect(push.shown({ argv: ['fly', 'secrets', 'set', 'A=has space'], keys: [] })).toBe("fly secrets set 'A=has space'")
   })
+
+  test('shown spells out stdin instead of a redirect, quoting it only when it has spaces or lines', async () => {
+    expect(push.shown({ argv: ['gh', 'secret', 'set', 'K'], stdin: '{{K}}', keys: ['K'] })).toBe('gh secret set K (stdin: {{K}})')
+    expect(push.shown({ argv: ['fly', 'secrets', 'import'], stdin: 'A={{A}}\nB={{B}}', keys: ['A', 'B'] })).toBe(
+      'fly secrets import (stdin: "A={{A}}\\nB={{B}}")',
+    )
+  })
 })

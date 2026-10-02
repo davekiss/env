@@ -66,7 +66,10 @@ export function redact(text: string, values: Record<string, string>): string {
 // The command as the user is asked to approve it: placeholders, never values
 export function shown(plan: Plan): string {
   const words = plan.argv.map(arg => (/^[\w@%+=:,./{}-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`))
-  return words.join(' ') + (plan.stdin === undefined ? '' : ` < ${JSON.stringify(plan.stdin)}`)
+  if (plan.stdin === undefined) return words.join(' ')
+  // Spelled out rather than `< ...`, which reads as a file redirect
+  const stdin = /^[^\s"'\\]+$/.test(plan.stdin) ? plan.stdin : JSON.stringify(plan.stdin)
+  return `${words.join(' ')} (stdin: ${stdin})`
 }
 
 export function tail(text: string, max = 1500): string {

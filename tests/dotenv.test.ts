@@ -97,4 +97,28 @@ describe('bash fence', () => {
       expect(bashReason(command)).toBeDefined()
     }
   })
+
+  test('allows quoted sentences that mention env files, and harmless commands later in a chain', async () => {
+    for (const command of [
+      'herdr agent prompt env-test "Set the key in .env.local, then report back"',
+      'gh pr create --title "Fence fix" --body "Commands that mention .env.local in prose now pass"',
+      'cd ~/app && git check-ignore -v .env.local',
+      'cd ~/app && ls -a .env.local',
+    ]) {
+      expect(bashReason(command)).toBeUndefined()
+    }
+  })
+
+  test('still blocks code in quotes, substitutions in sentences, and reads after a harmless command', async () => {
+    for (const command of [
+      'bash -c "cat .env.local | head"',
+      'python3 -c "import os; print(open(\'.env\').read())"',
+      'echo "here it is: $(cat .env.local)"',
+      'cat ".env.local"',
+      'ls .env && cat .env',
+      'cd ~/app && cat .env.local',
+    ]) {
+      expect(bashReason(command)).toBeDefined()
+    }
+  })
 })
