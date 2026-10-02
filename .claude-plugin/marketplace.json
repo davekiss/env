@@ -1,0 +1,11 @@
+{
+  "name": "davekiss",
+  "owner": { "name": "Dave Kiss", "url": "https://github.com/davekiss" },
+  "plugins": [
+    {
+      "name": "env",
+      "source": "./",
+      "description": "Edit .env files in a pane inside Claude Code. Claude manages keys and asks you for values without ever seeing them."
+    }
+  ]
+}

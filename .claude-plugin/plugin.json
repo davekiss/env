@@ -1,0 +1,11 @@
+{
+  "name": "env",
+  "version": "0.2.0",
+  "description": "Edit .env files in a pane inside Claude Code. Claude manages keys and asks you for values without ever seeing them.",
+  "author": { "name": "Dave Kiss", "url": "https://github.com/davekiss" },
+  "homepage": "https://github.com/davekiss/env",
+  "repository": "https://github.com/davekiss/env",
+  "license": "MIT",
+  "keywords": ["env", "dotenv", "secrets", "mod"],
+  "types": "./types/index.d.ts"
+}
