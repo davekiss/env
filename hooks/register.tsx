@@ -4,6 +4,7 @@ import type { ElementTable, EngineInterface, Register } from 'claude-code'
 import type { EnvEditing, EnvFit, EnvRequest } from '../types'
 import * as env from './dotenv'
 import { bashReason, grepReason, isProtectedPath } from './guard'
+import * as push from './push'
 
 const PANE = 'env'
 const TOOL = 'mcp__env__'
@@ -26,7 +27,8 @@ const KEY_NAME = /^[A-Za-z_][A-Za-z0-9_.-]*$/
 const DENY =
   'env: .env files are edited by the user in the /env pane, and their values never enter ' +
   'this conversation. Use mcp__env__list to see keys and what each value looks like, ' +
-  'mcp__env__request to ask the user for a value, and mcp__env__generate for a random secret. ' +
+  'mcp__env__request to ask the user for a value, mcp__env__generate for a random secret, and ' +
+  'mcp__env__push to send a value to a hosting service through its CLI. ' +
   'Programs that load .env (npm run dev, tests) still run normally.'
 
 type Engine = EngineInterface
@@ -320,6 +322,33 @@ export const register: Register = on => {
       },
     })
 
+    await $.tool.register({
+      name: 'push',
+      description:
+        "Sends env values to a hosting service by running that service's own CLI, with {{KEY}} in argv " +
+        'or stdin replaced by the value from the env file. You never see the value, and the user ' +
+        'approves the command (shown with placeholders) before it runs. Prefer stdin, since arguments ' +
+        `show in the process list. Only these CLIs run: ${push.CLIS.join(', ')}. Examples: ` +
+        '{argv: ["vercel", "env", "add", "STRIPE_KEY", "production"], stdin: "{{STRIPE_KEY}}"}; ' +
+        '{argv: ["gh", "secret", "set", "STRIPE_KEY"], stdin: "{{STRIPE_KEY}}"}; ' +
+        '{argv: ["wrangler", "secret", "put", "STRIPE_KEY"], stdin: "{{STRIPE_KEY}}"}; ' +
+        '{argv: ["fly", "secrets", "import"], stdin: "STRIPE_KEY={{STRIPE_KEY}}"}. ' +
+        'Run one command per call. Commands that need no env value belong in Bash.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          argv: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'The command and its arguments, the CLI first. No shell: no pipes, quoting or $VARS.',
+          },
+          stdin: { type: 'string', description: 'Text written to the command\'s stdin, e.g. "{{STRIPE_KEY}}"' },
+          file: { type: 'string', description: 'The env file the values come from. Default .env.local, else .env' },
+        },
+        required: ['argv'],
+      },
+    })
+
     // Notice edits made outside the pane (another editor, a script)
     $.clock.every(2000, () => {
       void $.fs.list().then(listing => {
@@ -495,6 +524,59 @@ export const register: Register = on => {
     if (env.get(lines, key) === undefined) return { result: `${key} is not in ${file}.` }
     await save($, file, env.commentOut(lines, key, `removed by Claude; uncomment to restore`))
     return { result: `Commented out ${key} in ${file}.` }
+  })
+
+  on('tool.call', { tool: 'mcp__env__push' }, async ($, e) => {
+    const input = e as unknown as Record<string, unknown>
+    const plan = push.check(input.argv, input.stdin)
+    if ('error' in plan) return { result: plan.error }
+    const file = asFile(input.file) ?? (await defaultFile($))
+    const cli = plan.argv[0] ?? ''
+
+    const lines = await load($, file)
+    const values: Record<string, string> = {}
+    for (const key of plan.keys) {
+      const value = env.get(lines, key)
+      if (value) values[key] = value
+    }
+    const missing = plan.keys.filter(key => values[key] === undefined)
+    if (missing.length > 0) {
+      return { result: `${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not set in ${file}. Use mcp__env__request to have the user set ${missing.length === 1 ? 'it' : 'them'} first.` }
+    }
+
+    const command = push.shown(plan)
+    const yes = 'Run it'
+    const answer = await $.ui
+      .ask(`Run \`${command}\` with ${plan.keys.join(', ')} filled in from ${file}?`, {
+        header: 'env',
+        options: [yes, "Don't run it"],
+      })
+      .catch(() => null)
+    if (answer !== yes) {
+      const said = answer && answer !== "Don't run it" ? ` They said: ${env.scrub(answer, index)}` : ''
+      return { result: `The user did not approve \`${command}\`, so nothing ran.${said}` }
+    }
+
+    const ran = await $.process
+      .run(
+        plan.argv.map(arg => push.fill(arg, values)),
+        { stdin: plan.stdin === undefined ? undefined : push.fill(plan.stdin, values), timeoutMs: 120_000 },
+      )
+      .catch((error: unknown) => ({ error: push.redact(String(error), values) }))
+    if ('error' in ran) {
+      return { result: `\`${command}\` could not run: ${ran.error}. Is ${cli} installed and on PATH?` }
+    }
+
+    const clean = (text: string) => push.tail(push.redact(env.scrub(text, index), values))
+    const out = [`\`${command}\` exited ${ran.exitCode}.`]
+    if (ran.stdout.trim()) out.push(`stdout:\n${clean(ran.stdout)}`)
+    if (ran.stderr.trim()) out.push(`stderr:\n${clean(ran.stderr)}`)
+    if (ran.exitCode !== 0) {
+      out.push(`If ${cli} isn't logged in or linked, ask the user to run \`! ${cli} login\` (or link the project) and try again.`)
+    } else {
+      $.ui.toast(`Sent ${plan.keys.join(', ')} with ${cli}`)
+    }
+    return { result: out.join('\n') }
   })
 
   // While the pane waits for a wider terminal, Claude's request shows here

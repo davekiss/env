@@ -84,8 +84,22 @@ Claude can manage your env files without reading them:
 | `mcp__env__generate` | Writes a random secret (auth secrets, signing keys) without returning it |
 | `mcp__env__copy` | Copies a value to another file, or to a new key name, without reading it |
 | `mcp__env__remove` | Comments a key out, so you can bring it back |
+| `mcp__env__push` | Runs a hosting CLI (`vercel`, `gh`, `wrangler`, `fly`…) with `{{KEY}}` filled in from your env file, after you approve the command |
 
 > *"Rename CLOUDFLARE_API_TOKEN to CLOUDFLARE_AUTH_TOKEN."* · *"Copy the database URL into .env.test."* · *"Generate a NEXTAUTH_SECRET."*
+
+### It ships values to your host
+
+Claude can send a value to Vercel, GitHub Actions, Cloudflare and the rest through the CLIs you're already logged into. It writes the command with a placeholder, you approve it, and env fills in the value and pipes it to the CLI's stdin:
+
+```
+Run `vercel env add STRIPE_SECRET_KEY production < "{{STRIPE_SECRET_KEY}}"`
+with STRIPE_SECRET_KEY filled in from .env.local?
+```
+
+Only known hosting CLIs run (`vercel`, `gh`, `wrangler`, `fly`, `netlify`, `railway`, `heroku`, `supabase`, `firebase`, `render`, `doppler`, `aws`, `gcloud`, `az`), and any value that comes back in their output is redacted before Claude reads it.
+
+> *"Push the Stripe keys to Vercel production."* · *"Set the Cloudflare token as a GitHub Actions secret."*
 
 ### It edits the file the way you wrote it
 
