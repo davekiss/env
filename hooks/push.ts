@@ -16,6 +16,7 @@ export const CLIS = [
   'gh',
   'heroku',
   'netlify',
+  'op',
   'railway',
   'render',
   'supabase',

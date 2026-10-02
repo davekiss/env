@@ -4,6 +4,7 @@ import type { ElementTable, EngineInterface, Register } from 'claude-code'
 import type { EnvEditing, EnvFit, EnvRequest } from '../types'
 import * as env from './dotenv'
 import { bashReason, grepReason, isProtectedPath } from './guard'
+import * as pull from './pull'
 import * as push from './push'
 
 const PANE = 'env'
@@ -28,7 +29,7 @@ const DENY =
   'env: .env files are edited by the user in the /env pane, and their values never enter ' +
   'this conversation. Use mcp__env__list to see keys and what each value looks like, ' +
   'mcp__env__request to ask the user for a value, mcp__env__generate for a random secret, and ' +
-  'mcp__env__push to send a value to a hosting service through its CLI. ' +
+  'mcp__env__push and mcp__env__pull to send values to or fetch them from a hosting service through its CLI. ' +
   'Programs that load .env (npm run dev, tests) still run normally.'
 
 type Engine = EngineInterface
@@ -349,6 +350,37 @@ export const register: Register = on => {
       },
     })
 
+    await $.tool.register({
+      name: 'pull',
+      description:
+        "Fetches env values from a hosting or secrets service by running that service's own CLI, and " +
+        'writes them into an env file. You never see the values; you get back which keys were set. ' +
+        'Three shapes: the CLI prints KEY=value lines; the CLI writes a dotenv file, where ' +
+        `${pull.OUT} in argv stands for a temp file env reads back; or the CLI prints one value, named by key. ` +
+        'A key the file already has with a different value is kept unless overwrite is true, and then ' +
+        `the user is asked first. Only these CLIs run: ${push.CLIS.join(', ')}. Examples: ` +
+        `{argv: ["vercel", "env", "pull", "${pull.OUT}", "--environment=development", "--yes"]}; ` +
+        '{argv: ["doppler", "secrets", "download", "--no-file", "--format", "env"]}; ' +
+        '{argv: ["heroku", "config", "--shell", "-a", "my-app"]}; ' +
+        '{argv: ["op", "read", "op://Dev/Stripe/secret key"], key: "STRIPE_SECRET_KEY"}. ' +
+        'GitHub, Cloudflare and Fly secrets are write-only and cannot be pulled.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          argv: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'The command and its arguments, the CLI first. No shell: no pipes, quoting or $VARS.',
+          },
+          key: { type: 'string', description: 'When the CLI prints a single value: the key to store it under' },
+          keys: { type: 'array', items: { type: 'string' }, description: 'Only take these keys from KEY=value output' },
+          file: { type: 'string', description: 'The env file to write. Default .env.local, else .env' },
+          overwrite: { type: 'boolean', description: 'Replace keys the file already has with other values (the user is asked)' },
+        },
+        required: ['argv'],
+      },
+    })
+
     // Notice edits made outside the pane (another editor, a script)
     $.clock.every(2000, () => {
       void $.fs.list().then(listing => {
@@ -577,6 +609,80 @@ export const register: Register = on => {
       $.ui.toast(`Sent ${plan.keys.join(', ')} with ${cli}`)
     }
     return { result: out.join('\n') }
+  })
+
+  on('tool.call', { tool: 'mcp__env__pull' }, async ($, e) => {
+    const input = e as unknown as Record<string, unknown>
+    const plan = pull.check(input.argv, input.key, input.keys)
+    if ('error' in plan) return { result: plan.error }
+    const file = asFile(input.file) ?? (await defaultFile($))
+    const cli = plan.argv[0] ?? ''
+    const command = push.shown({ argv: plan.argv, keys: [] })
+    const login = `If ${cli} isn't logged in or linked, ask the user to run \`! ${cli} login\` (or link the project) and try again.`
+
+    // A CLI that writes a file gets a fresh temp folder, removed afterwards
+    let dir: string | undefined
+    if (plan.usesFile) {
+      const made = await $.process.run(['mktemp', '-d']).catch(() => null)
+      dir = made?.exitCode === 0 ? made.stdout.trim() : undefined
+      if (!dir) return { result: 'Could not make a temp folder for the pulled file, so nothing ran.' }
+    }
+    const out = `${dir}/pulled.env`
+
+    try {
+      const ran = await $.process
+        .run(
+          plan.argv.map(arg => (arg === pull.OUT ? out : arg)),
+          { timeoutMs: 120_000 },
+        )
+        .catch((error: unknown) => ({ error: env.scrub(String(error), index) }))
+      if ('error' in ran) return { result: `\`${command}\` could not run: ${ran.error}. Is ${cli} installed and on PATH?` }
+
+      const text = dir ? String(await $.fs.read(out).catch(() => '')) : ran.stdout
+      const values = pull.incoming(plan, text)
+      const clean = (t: string) => push.tail(push.redact(env.scrub(t, index), values))
+      const stderr = ran.stderr.trim() ? `stderr:\n${clean(ran.stderr)}` : ''
+      if (ran.exitCode !== 0) {
+        return { result: [`\`${command}\` exited ${ran.exitCode}, so nothing was written.`, stderr, login].filter(Boolean).join('\n') }
+      }
+      if (Object.keys(values).length === 0) {
+        const wanted = plan.key ? 'a value' : plan.keys ? `any of ${plan.keys.join(', ')}` : 'any KEY=value lines'
+        return { result: [`\`${command}\` gave ${wanted}, so nothing was written.`, stderr].filter(Boolean).join('\n') }
+      }
+
+      const lines = await load($, file)
+      let overwrite = input.overwrite === true
+      const clash = pull.conflicts(lines, values)
+      if (overwrite && clash.length > 0) {
+        const yes = 'Replace them'
+        const answer = await $.ui
+          .ask(`Replace ${clash.join(', ')} in ${file} with the values from \`${command}\`?`, {
+            header: 'env',
+            options: [yes, 'Keep mine'],
+          })
+          .catch(() => null)
+        overwrite = answer === yes
+      }
+      const merged = pull.merge(lines, values, overwrite)
+      if (merged.added.length + merged.changed.length > 0) {
+        await save($, file, merged.lines)
+        $.ui.toast(`Pulled ${merged.added.length + merged.changed.length} keys into ${file} with ${cli}`)
+      }
+
+      const report = [`Ran \`${command}\`, values not shown. In ${file}:`]
+      if (merged.added.length > 0) report.push(`  set: ${merged.added.join(', ')}`)
+      if (merged.changed.length > 0) report.push(`  replaced: ${merged.changed.join(', ')}`)
+      if (merged.same.length > 0) report.push(`  already matching: ${merged.same.join(', ')}`)
+      if (merged.kept.length > 0) {
+        report.push(
+          `  kept the file's own value: ${merged.kept.join(', ')}` +
+            (input.overwrite === true ? ' (the user chose to keep them)' : ' (pass overwrite: true to replace; the user will be asked)'),
+        )
+      }
+      return { result: report.join('\n') }
+    } finally {
+      if (dir) await $.process.run(['rm', '-rf', dir]).catch(() => undefined)
+    }
   })
 
   // While the pane waits for a wider terminal, Claude's request shows here
