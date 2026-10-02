@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { ElementTable, EngineInterface, Register } from 'claude-code'
 
 import type { EnvEditing, EnvFit, EnvRequest } from '../types'
 import * as env from './dotenv'
@@ -17,6 +17,9 @@ const request = atom({ plugin: 'env', key: 'request' } as const, null as EnvRequ
 const fit = atom({ plugin: 'env', key: 'fit' } as const, null as EnvFit)
 const rev = atom({ plugin: 'env', key: 'rev' } as const, 0)
 const flash = atom({ plugin: 'env', key: 'flash' } as const, null as string | null)
+// The pane is open but the surface hasn't placed it (opened unasked on a
+// narrow terminal), so the request card draws above the prompt instead
+const isWaiting = atom({ plugin: 'env', key: 'isWaiting' } as const, false)
 
 const KEY_NAME = /^[A-Za-z_][A-Za-z0-9_.-]*$/
 
@@ -136,6 +139,95 @@ function scrubBlock(block: Block): Block {
   return block
 }
 
+async function store($: Engine, target: string, key: string, value: string): Promise<void> {
+  await save($, target, env.set(await load($, target), key, value))
+  await update($, editing, () => null)
+  await update($, flash, () => `Saved ${key} in ${target}`)
+  const wanted = await read($, request)
+  if (wanted && wanted.key === key && wanted.file === target) {
+    await update($, request, () => null)
+    await update($, fit, () => null)
+    void $.prompt.submit({ text: `[env] ${key} is now set in ${target}. Continue.` })
+  }
+}
+
+// The card Claude's request draws: what, why, where to get it, and the
+// field to paste into, readable at a glance. In the pane, or in the band
+// above the prompt while the pane waits for a wider terminal.
+async function requestCard($: Engine, ui: ElementTable<'terminal' | 'desktop'>, asked: EnvRequest, where: 'pane' | 'band') {
+  const { Box, Text, Button, Input, Markdown } = ui
+  const pasted = await read($, fit)
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1} marginBottom={where === 'pane' ? 1 : 0}>
+      <Text bold color="yellow">
+        Claude needs a value
+      </Text>
+      <Box gap={1} marginTop={1}>
+        <Text bold>{asked.key}</Text>
+        <Text dimColor>→ {asked.file}</Text>
+      </Box>
+      {asked.reason !== '' && <Text wrap="wrap">{asked.reason}</Text>}
+
+      {asked.steps.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          {asked.steps.map((step, i) => (
+            <Box key={`step:${i}`} gap={1}>
+              <Text bold color="yellow">
+                {String(i + 1)}.
+              </Text>
+              <Text wrap="wrap">{step}</Text>
+            </Box>
+          ))}
+        </Box>
+      )}
+
+      {asked.url && (
+        <Box gap={1} marginTop={1}>
+          <Markdown text={`[${asked.url}](${asked.url})`} />
+          <Button
+            key="copy-url"
+            label="copy link"
+            plain
+            dimColor
+            onPress={press => void $.ui.copy({ text: asked.url ?? '', surface: press.surface })}
+          />
+        </Box>
+      )}
+      {asked.format && <Text dimColor>Looks like: {asked.format}</Text>}
+
+      <Box marginTop={1}>
+        <Input
+          key="request"
+          label="Paste ▸ "
+          placeholder={`${asked.key}, then Enter`}
+          submitLabel="save"
+          autoFocus
+          onInput={value => void update($, fit, () => fitOf(value, asked.pattern))}
+          onSubmit={value => void store($, asked.file, asked.key, value.trim())}
+        />
+      </Box>
+      {pasted === 'ok' && <Text color="green">✓ looks right</Text>}
+      {pasted === 'off' && <Text color="red">✗ doesn't look like {asked.format ?? 'the expected format'}; Enter still saves</Text>}
+      <Box gap={1} marginTop={1}>
+        <Button key="skip" label="skip for now" plain dimColor onPress={() => void abandon($, 'skipped')} />
+        {where === 'band' && (
+          <Button
+            key="open-pane"
+            label="open /env pane"
+            plain
+            dimColor
+            onPress={async () => {
+              const opened = await $.ui.open({ id: PANE, title: 'env', focus: true })
+              await update($, isWaiting, () => !opened.isPlaced)
+            }}
+          />
+        )}
+      </Box>
+      {where === 'band' && <Text dimColor>Click the field or press ctrl+x tab to paste.</Text>}
+    </Box>
+  )
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await refresh($)
@@ -237,6 +329,12 @@ export const register: Register = on => {
           .join('|')
         if (now !== signature) return refresh($)
       })
+      // A waiting pane is placed once the terminal widens to its floor
+      void $.ui.panes().then(async panes => {
+        const pane = panes.find(p => p.id === PANE)
+        const waiting = pane !== undefined && !pane.isPlaced
+        if (waiting !== (await read($, isWaiting))) await update($, isWaiting, () => waiting)
+      })
     })
 
     return next(e)
@@ -244,12 +342,16 @@ export const register: Register = on => {
 
   on('command.run', { command: 'env' }, async $ => {
     await refresh($)
-    await $.ui.open({ id: PANE, title: 'env', focus: true })
+    const opened = await $.ui.open({ id: PANE, title: 'env', focus: true })
+    await update($, isWaiting, () => !opened.isPlaced)
     return { text: 'Opened the env pane.' }
   })
 
   on('ui.close', async ($, e, next) => {
-    if (e.id === PANE && e.origin.kind === 'person') await abandon($, 'closed the pane without setting')
+    if (e.id === PANE) {
+      await update($, isWaiting, () => false)
+      if (e.origin.kind === 'person') await abandon($, 'closed the pane without setting')
+    }
     return next(e)
   })
 
@@ -337,11 +439,22 @@ export const register: Register = on => {
     await update($, fit, () => null)
     await update($, active, () => file)
     await update($, editing, () => null)
-    await $.ui.open({ id: PANE, title: 'env', focus: true })
-    $.ui.toast(`Claude needs ${key}`)
-    return {
-      result: `Asked the user to set ${key} in ${file} in the /env pane. Stop here and wait; you will get a message once it is saved, skipped or the pane is closed.`,
+    // Opened by Claude, not the person, so a narrow terminal leaves the pane
+    // waiting undrawn; the card then shows in the band above the prompt
+    const opened = await $.ui.open({ id: PANE, title: 'env', focus: true })
+    await update($, isWaiting, () => !opened.isPlaced)
+    const wait = 'Stop here and wait; you will get a message once it is saved, skipped or the pane is closed.'
+    if (!opened.isPlaced) {
+      $.ui.toast(`Claude needs ${key}: paste it above the prompt`)
+      return {
+        result:
+          `The terminal is too narrow for the /env pane to open on its own, so the request for ${key} (${file}) ` +
+          `shows as a card above the prompt instead. Tell the user in one line to paste it there, or type /env ` +
+          `to open the full pane. ${wait}`,
+      }
     }
+    $.ui.toast(`Claude needs ${key}`)
+    return { result: `Asked the user to set ${key} in ${file} in the /env pane. ${wait}` }
   })
 
   on('tool.call', { tool: 'mcp__env__generate' }, async ($, e) => {
@@ -384,12 +497,26 @@ export const register: Register = on => {
     return { result: `Commented out ${key} in ${file}.` }
   })
 
+  // While the pane waits for a wider terminal, Claude's request shows here
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.surface !== 'terminal' && e.surface !== 'desktop') return next(e)
+    if (e.props.hasSurvey || !(await read($, isWaiting))) return next(e)
+    const asked = await read($, request)
+    if (!asked) return next(e)
+    // isWaiting trails the surface by up to a poll; ask the surface itself
+    // so the card leaves the moment the pane is placed
+    const pane = (await $.ui.panes()).find(p => p.id === PANE)
+    if (!pane || pane.isPlaced) return next(e)
+    return requestCard($, $.ui.resolve(e), asked, 'band')
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     if (e.surface !== 'terminal' && e.surface !== 'desktop') {
       const { Text } = $.ui.resolve(e)
       return <Text>Open a terminal or the desktop app to edit env files.</Text>
     }
-    const { Box, Text, Button, Input, Markdown } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Text, Button, Input } = ui
 
     await read($, rev)
     const names = await read($, files)
@@ -397,7 +524,6 @@ export const register: Register = on => {
     const edit = await read($, editing)
     const shown = await read($, revealed)
     const asked = await read($, request)
-    const pasted = await read($, fit)
     const pending = await read($, confirm)
     const note = await read($, flash)
 
@@ -414,76 +540,7 @@ export const register: Register = on => {
 
     const say = (text: string | null) => update($, flash, () => text)
 
-    const store = async (target: string, key: string, value: string) => {
-      await save($, target, env.set(await load($, target), key, value))
-      await update($, editing, () => null)
-      await say(`Saved ${key} in ${target}`)
-      const wanted = await read($, request)
-      if (wanted && wanted.key === key && wanted.file === target) {
-        await update($, request, () => null)
-        await update($, fit, () => null)
-        void $.prompt.submit({ text: `[env] ${key} is now set in ${target}. Continue.` })
-      }
-    }
-
-    // The card Claude's request draws: what, why, where to get it, and the
-    // field to paste into, readable at a glance
-    const card = asked && (
-      <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1} marginBottom={1}>
-        <Text bold color="yellow">
-          Claude needs a value
-        </Text>
-        <Box gap={1} marginTop={1}>
-          <Text bold>{asked.key}</Text>
-          <Text dimColor>→ {asked.file}</Text>
-        </Box>
-        {asked.reason !== '' && <Text wrap="wrap">{asked.reason}</Text>}
-
-        {asked.steps.length > 0 && (
-          <Box flexDirection="column" marginTop={1}>
-            {asked.steps.map((step, i) => (
-              <Box key={`step:${i}`} gap={1}>
-                <Text bold color="yellow">
-                  {String(i + 1)}.
-                </Text>
-                <Text wrap="wrap">{step}</Text>
-              </Box>
-            ))}
-          </Box>
-        )}
-
-        {asked.url && (
-          <Box gap={1} marginTop={1}>
-            <Markdown text={`[${asked.url}](${asked.url})`} />
-            <Button
-              key="copy-url"
-              label="copy link"
-              plain
-              dimColor
-              onPress={press => void $.ui.copy({ text: asked.url ?? '', surface: press.surface })}
-            />
-          </Box>
-        )}
-        {asked.format && <Text dimColor>Looks like: {asked.format}</Text>}
-
-        <Box marginTop={1}>
-          <Input
-            key="request"
-            label="Paste ▸ "
-            placeholder={`${asked.key}, then Enter`}
-            submitLabel="save"
-            autoFocus
-            onInput={value => void update($, fit, () => fitOf(value, asked.pattern))}
-            onSubmit={value => void store(asked.file, asked.key, value.trim())}
-          />
-        </Box>
-        {pasted === 'ok' && <Text color="green">✓ looks right</Text>}
-        {pasted === 'off' && <Text color="red">✗ doesn't look like {asked.format ?? 'the expected format'}; Enter still saves</Text>}
-        <Box marginTop={1}>
-          <Button key="skip" label="skip for now" plain dimColor onPress={() => void abandon($, 'skipped')} />
-        </Box>
-      </Box>
-    )
+    const card = asked && (await requestCard($, ui, asked, 'pane'))
 
     const valueEditor = (key: string) => (
       <Box flexDirection="column" marginBottom={1}>
@@ -493,10 +550,10 @@ export const register: Register = on => {
           placeholder="paste the value, Enter saves"
           submitLabel="save"
           autoFocus
-          onSubmit={value => void store(file, key, value)}
+          onSubmit={value => void store($, file, key, value)}
         />
         <Box gap={1}>
-          <Button key="gen" label="generate random" onPress={() => void store(file, key, env.randomSecret(32, 'base64url'))} />
+          <Button key="gen" label="generate random" onPress={() => void store($, file, key, env.randomSecret(32, 'base64url'))} />
           <Button key="cancel" label="cancel" onPress={() => void update($, editing, () => null)} />
         </Box>
       </Box>

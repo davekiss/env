@@ -22,6 +22,7 @@ declare module 'claude-code' {
       fit: EnvFit
       rev: number
       flash: string | null
+      isWaiting: boolean
     }
   }
 }
