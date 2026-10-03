@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.3.0-000" alt="Version 0.3.0">
+  <img src="https://img.shields.io/badge/version-0.4.0-000" alt="Version 0.4.0">
   <img src="https://img.shields.io/badge/Claude%20Code-2.1.287%2B-000" alt="Claude Code 2.1.287+">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-000" alt="MIT"></a>
 </p>

@@ -1,6 +1,6 @@
 {
   "name": "env",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Edit .env files in a pane inside Claude Code. Claude manages keys and asks you for values without ever seeing them.",
   "author": { "name": "Dave Kiss", "url": "https://github.com/davekiss" },
   "homepage": "https://github.com/davekiss/env",
