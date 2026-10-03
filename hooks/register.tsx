@@ -3,9 +3,10 @@ import type { ElementTable, EngineInterface, Register } from 'claude-code'
 
 import type { EnvEditing, EnvFit, EnvRequest } from '../types'
 import * as env from './dotenv'
-import { bashReason, grepReason, isProtectedPath } from './guard'
+import { basename, bashReason, grepReason, isProtectedPath } from './guard'
 import * as pull from './pull'
 import * as push from './push'
+import * as worktree from './worktree'
 
 const PANE = 'env'
 const TOOL = 'mcp__env__'
@@ -300,16 +301,23 @@ export const register: Register = on => {
     })
     await $.tool.register({
       name: 'copy',
-      description: 'Copies a value from one env file to another (optionally under a new key) without reading it.',
+      description:
+        'Copies env values without reading them: one key (optionally renamed with as), or with no key ' +
+        "the whole file. from and to are env file names in this project's root (.env.local), or paths " +
+        "to an env file at the root of another of this repo's git worktrees (../app-feature/.env.local), " +
+        'e.g. to set up a new worktree. A whole-file copy into a file that does not exist yet copies it ' +
+        "as-is, comments included; into an existing file, keys the target already has with a different " +
+        'value are kept unless overwrite is true.',
       inputSchema: {
         type: 'object',
         properties: {
-          key: { type: 'string' },
-          from: { type: 'string' },
-          to: { type: 'string' },
-          as: { type: 'string', description: 'Key name in the target file. Default: same key.' },
+          key: { type: 'string', description: 'One key to copy. Omit to copy every key.' },
+          from: { type: 'string', description: 'An env file name, or a path to one in another worktree' },
+          to: { type: 'string', description: 'An env file name, or a path to one in another worktree' },
+          as: { type: 'string', description: 'Key name in the target file, with key. Default: same key.' },
+          overwrite: { type: 'boolean', description: 'Whole-file copy only: replace keys the target sets differently' },
         },
-        required: ['key', 'from', 'to'],
+        required: ['from', 'to'],
       },
     })
     await $.tool.register({
@@ -536,15 +544,54 @@ export const register: Register = on => {
 
   on('tool.call', { tool: 'mcp__env__copy' }, async ($, e) => {
     const input = e as unknown as Record<string, unknown>
-    const key = String(input.key ?? '')
-    const target = String(input.as ?? key)
-    const from = asFile(input.from)
-    const to = asFile(input.to)
-    if (!from || !to || !KEY_NAME.test(target)) return { result: 'from and to must be env files, and the key a valid name.' }
-    const value = env.get(await load($, from), key)
-    if (value === undefined) return { result: `${key} is not set in ${from}.` }
-    await save($, to, env.set(await load($, to), target, value))
-    return { result: `Copied ${key} from ${from} to ${to}${target === key ? '' : ` as ${target}`}.` }
+    const git = async (...args: string[]) => {
+      const ran = await $.process.run(['git', ...args]).catch(() => null)
+      return ran?.exitCode === 0 ? ran.stdout.trim() : ''
+    }
+    const isPath = [input.from, input.to].some(value => typeof value === 'string' && value.includes('/'))
+    // Only a path needs git: where the session sits, and which worktrees exist
+    const root = isPath ? await git('rev-parse', '--show-toplevel') : ''
+    const prefix = isPath ? await git('rev-parse', '--show-prefix') : ''
+    const cwd = prefix ? `${root}/${prefix.replace(/\/$/, '')}` : root
+    const trees = isPath ? worktree.parseWorktrees(await git('worktree', 'list', '--porcelain')) : []
+    const from = worktree.resolve(input.from, cwd, trees)
+    const to = worktree.resolve(input.to, cwd, trees)
+    if ('error' in from) return { result: from.error }
+    if ('error' in to) return { result: to.error }
+    if (from.path === to.path) return { result: 'from and to are the same file.' }
+    if (env.isTemplate(basename(to.path))) {
+      return { result: `${to.label} is a template, usually committed, so env won't copy values into it.` }
+    }
+
+    const source = await load($, from.path)
+    if (input.key !== undefined) {
+      const key = String(input.key)
+      const target = String(input.as ?? key)
+      if (!KEY_NAME.test(target)) return { result: `"${target}" is not a valid env key name.` }
+      const value = env.get(source, key)
+      if (value === undefined) return { result: `${key} is not set in ${from.label}.` }
+      await save($, to.path, env.set(await load($, to.path), target, value))
+      return { result: `Copied ${key} from ${from.label} to ${to.label}${target === key ? '' : ` as ${target}`}.` }
+    }
+
+    const keys = env.entries(source).map(entry => entry.key)
+    if (keys.length === 0) return { result: `${from.label} has no keys to copy.` }
+    if (!(await $.fs.exists(to.path))) {
+      await save($, to.path, source)
+      $.ui.toast(`Copied ${from.label} to ${to.label}`)
+      return { result: `Copied ${from.label} to ${to.label} as-is: ${keys.join(', ')}. Values not shown.` }
+    }
+    const values = Object.fromEntries(env.entries(source).map(entry => [entry.key, entry.value]))
+    const merged = pull.merge(await load($, to.path), values, input.overwrite === true)
+    if (merged.added.length + merged.changed.length > 0) await save($, to.path, merged.lines)
+    const report = [`Copied ${from.label} into ${to.label}, values not shown:`]
+    if (merged.added.length > 0) report.push(`  set: ${merged.added.join(', ')}`)
+    if (merged.changed.length > 0) report.push(`  replaced: ${merged.changed.join(', ')}`)
+    if (merged.same.length > 0) report.push(`  already matching: ${merged.same.join(', ')}`)
+    if (merged.kept.length > 0) {
+      report.push(`  kept the target's own value: ${merged.kept.join(', ')} (overwrite: true replaces them; ask the user first)`)
+    }
+    return { result: report.join('\n') }
   })
 
   on('tool.call', { tool: 'mcp__env__remove' }, async ($, e) => {

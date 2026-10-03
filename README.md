@@ -82,12 +82,12 @@ Claude can manage your env files without reading them:
 | `mcp__env__list` | Lists keys and what each value looks like (kind, length, a known prefix like `sk_live_`), never the value |
 | `mcp__env__request` | Shows you the card above |
 | `mcp__env__generate` | Writes a random secret (auth secrets, signing keys) without returning it |
-| `mcp__env__copy` | Copies a value to another file, or to a new key name, without reading it |
+| `mcp__env__copy` | Copies a value, or a whole file, to another env file or into another git worktree, without reading it |
 | `mcp__env__remove` | Comments a key out, so you can bring it back |
 | `mcp__env__push` | Runs a hosting CLI (`vercel`, `gh`, `wrangler`, `fly`…) with `{{KEY}}` filled in from your env file, after you approve the command |
 | `mcp__env__pull` | Runs a hosting or secrets CLI (`vercel env pull`, `doppler`, `op read`…) and writes what it returns into your env file, reporting only which keys changed |
 
-> *"Rename CLOUDFLARE_API_TOKEN to CLOUDFLARE_AUTH_TOKEN."* · *"Copy the database URL into .env.test."* · *"Generate a NEXTAUTH_SECRET."*
+> *"Rename CLOUDFLARE_API_TOKEN to CLOUDFLARE_AUTH_TOKEN."* · *"Copy the database URL into .env.test."* · *"Copy my .env.local into the new worktree."* · *"Generate a NEXTAUTH_SECRET."*
 
 ### It talks to your host
 
