@@ -48,7 +48,7 @@ The value went into the file. It never went into the conversation.
 ## Get started
 
 ```
-/plugin marketplace add davekiss/env
+/plugin marketplace add davekiss/cc-plugins
 /plugin install env@davekiss
 ```
 
