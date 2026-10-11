@@ -28,7 +28,7 @@ export type Place = { path: string; label: string }
 // A bare name is a file in the session's own project root, as before. A path
 // must end in an env file name and sit at the root of a known worktree.
 export function resolve(value: unknown, cwd: string, worktrees: string[]): Place | { error: string } {
-  if (typeof value !== 'string' || value.trim() === '') return { error: 'from and to must name env files.' }
+  if (typeof value !== 'string' || value.trim() === '') return { error: 'Name an env file by its file name, or by a path to one in another worktree.' }
   const raw = value.trim()
   if (!raw.includes('/')) {
     return isEnvFile(raw) ? { path: raw, label: raw } : { error: `"${raw}" is not an env file name.` }

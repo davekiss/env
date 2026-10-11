@@ -1,43 +1,10 @@
 import { describe, expect, test } from 'claude-code/testing'
-import type { TestBody } from 'claude-code/testing'
 
 import * as env from '../hooks/dotenv'
 import * as worktree from '../hooks/worktree'
+import { FEATURE, MAIN, repo } from './repo'
 
-const MAIN = '/repo/app'
-const FEATURE = '/repo/app-feature'
 const SOURCE = '# Stripe\nSTRIPE_KEY=sk_live_main1234567\nPORT=3000\n'
-
-// A repo with a second worktree, files kept in memory by absolute path (a
-// bare name is the main checkout's), and git answering for MAIN
-function repo(on: Parameters<TestBody>[1], files: Record<string, string>): Record<string, string> {
-  // The engine resolves a bare name against the test's own folder
-  const abs = (path: string) => (path.startsWith('/repo/') ? path : `${MAIN}/${path.split('/').pop()}`)
-  on('fs.list', () => ({ value: [{ name: '.env.local', kind: 'file', size: 1, mtimeMs: 1 }] }) as never)
-  on('fs.read', ($, e) => {
-    const text = files[abs(e.path)]
-    if (text === undefined) throw new Error('ENOENT')
-    return { value: text }
-  })
-  on('fs.exists', ($, e) => ({ value: files[abs(e.path)] !== undefined }))
-  on('fs.write', ($, e) => {
-    files[abs(e.path)] = e.text
-    return { value: undefined }
-  })
-  on('process.run', ($, e) => {
-    const args = e.argv.slice(1).join(' ')
-    const stdout =
-      args === 'rev-parse --show-toplevel'
-        ? `${MAIN}\n`
-        : args === 'rev-parse --show-prefix'
-          ? '\n'
-          : args === 'worktree list --porcelain'
-            ? `worktree ${MAIN}\nHEAD abc\nbranch refs/heads/main\n\nworktree ${FEATURE}\nHEAD def\nbranch refs/heads/feature\n`
-            : ''
-    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-  })
-  return files
-}
 
 const copy = (input: Record<string, unknown>) => ({ tool: 'mcp__env__copy', from: '.env.local', ...input }) as never
 

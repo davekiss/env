@@ -35,9 +35,13 @@ const DENY =
 
 type Engine = EngineInterface
 
+const WHERE = " An env file name in this project's root, or a path to one at the root of another of this repo's git worktrees."
+
 // Value -> key, for the scrubber. Rebuilt whenever an env file changes.
 let index: env.Index = []
 let signature = ''
+// Env files written in other worktrees this session, so the scrubber covers them too
+const elsewhere = new Set<string>()
 
 function rank(name: string): number {
   if (env.isTemplate(name)) return 9
@@ -64,7 +68,7 @@ async function refresh($: Engine): Promise<void> {
     .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
 
   const parsed: Record<string, env.Line[]> = {}
-  for (const name of names) parsed[name] = await load($, name)
+  for (const name of [...names, ...elsewhere]) parsed[name] = await load($, name)
   index = env.buildIndex(parsed)
   signature = listing
     .filter(entry => env.isEnvFile(entry.name))
@@ -78,6 +82,7 @@ async function refresh($: Engine): Promise<void> {
 
 async function save($: Engine, file: string, lines: env.Line[]): Promise<void> {
   await $.fs.write(file, env.serialize(lines))
+  if (file.includes('/')) elsewhere.add(file)
   await refresh($)
 }
 
@@ -86,10 +91,26 @@ async function defaultFile($: Engine): Promise<string> {
   return names.includes('.env.local') ? '.env.local' : names.includes('.env') ? '.env' : '.env.local'
 }
 
-function asFile(value: unknown): string | undefined {
-  if (value === undefined) return undefined
-  const name = String(value)
-  return env.isEnvFile(name) ? name : undefined
+// An env file name in the project root, or a path to one at the root of
+// another of this repo's worktrees
+async function place($: Engine, value: unknown): Promise<worktree.Place | { error: string }> {
+  if (typeof value !== 'string' || !value.includes('/')) return worktree.resolve(value, '', [])
+  const git = async (...args: string[]) => {
+    const ran = await $.process.run(['git', ...args]).catch(() => null)
+    return ran?.exitCode === 0 ? ran.stdout.trim() : ''
+  }
+  const root = await git('rev-parse', '--show-toplevel')
+  const prefix = await git('rev-parse', '--show-prefix')
+  const cwd = prefix ? `${root}/${prefix.replace(/\/$/, '')}` : root
+  return worktree.resolve(value, cwd, worktree.parseWorktrees(await git('worktree', 'list', '--porcelain')))
+}
+
+// The file a tool names, or the default when it names none. A named file
+// that won't resolve is an error, never a quiet swap for the default.
+async function fileOf($: Engine, value: unknown): Promise<worktree.Place | { error: string }> {
+  if (value !== undefined) return place($, value)
+  const name = await defaultFile($)
+  return { path: name, label: name }
 }
 
 function fitOf(value: string, pattern: string | undefined): EnvFit {
@@ -265,7 +286,7 @@ export const register: Register = on => {
         type: 'object',
         properties: {
           key: { type: 'string', description: 'The variable name the code reads, e.g. CLOUDFLARE_ACCOUNT_ID' },
-          file: { type: 'string', description: 'Default .env.local, else .env' },
+          file: { type: 'string', description: 'Default .env.local, else .env.' + WHERE },
           reason: { type: 'string', description: 'Why it is needed, in under 12 words' },
           steps: {
             type: 'array',
@@ -291,7 +312,7 @@ export const register: Register = on => {
         type: 'object',
         properties: {
           key: { type: 'string' },
-          file: { type: 'string' },
+          file: { type: 'string', description: 'Default .env.local, else .env.' + WHERE },
           bytes: { type: 'number', description: 'Random bytes, default 32' },
           format: { type: 'string', enum: ['base64url', 'hex'] },
           overwrite: { type: 'boolean' },
@@ -326,7 +347,7 @@ export const register: Register = on => {
         'Removes a key from an env file by commenting it out, so the user can restore it. Ask the user before removing keys.',
       inputSchema: {
         type: 'object',
-        properties: { key: { type: 'string' }, file: { type: 'string' } },
+        properties: { key: { type: 'string' }, file: { type: 'string', description: WHERE.trim() } },
         required: ['key', 'file'],
       },
     })
@@ -352,7 +373,7 @@ export const register: Register = on => {
             description: 'The command and its arguments, the CLI first. No shell: no pipes, quoting or $VARS.',
           },
           stdin: { type: 'string', description: 'Text written to the command\'s stdin, e.g. "{{STRIPE_KEY}}"' },
-          file: { type: 'string', description: 'The env file the values come from. Default .env.local, else .env' },
+          file: { type: 'string', description: 'The env file the values come from. Default .env.local, else .env.' + WHERE },
         },
         required: ['argv'],
       },
@@ -382,7 +403,7 @@ export const register: Register = on => {
           },
           key: { type: 'string', description: 'When the CLI prints a single value: the key to store it under' },
           keys: { type: 'array', items: { type: 'string' }, description: 'Only take these keys from KEY=value output' },
-          file: { type: 'string', description: 'The env file to write. Default .env.local, else .env' },
+          file: { type: 'string', description: 'The env file to write. Default .env.local, else .env.' + WHERE },
           overwrite: { type: 'boolean', description: 'Replace keys the file already has with other values (the user is asked)' },
         },
         required: ['argv'],
@@ -491,7 +512,9 @@ export const register: Register = on => {
     const input = e as unknown as Record<string, unknown>
     const key = String(input.key ?? '')
     if (!KEY_NAME.test(key)) return { result: `"${key}" is not a valid env key name.` }
-    const file = asFile(input.file) ?? (await defaultFile($))
+    const target = await fileOf($, input.file)
+    if ('error' in target) return { result: target.error }
+    const file = target.path
     const text = (value: unknown, max: number) => (typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined)
     const steps = Array.isArray(input.steps) ? input.steps.map(step => String(step).slice(0, 160)).slice(0, 6) : []
     const url = text(input.url, 300)
@@ -517,20 +540,22 @@ export const register: Register = on => {
       $.ui.toast(`Claude needs ${key}: paste it above the prompt`)
       return {
         result:
-          `The terminal is too narrow for the /env pane to open on its own, so the request for ${key} (${file}) ` +
+          `The terminal is too narrow for the /env pane to open on its own, so the request for ${key} (${target.label}) ` +
           `shows as a card above the prompt instead. Tell the user in one line to paste it there, or type /env ` +
           `to open the full pane. ${wait}`,
       }
     }
     $.ui.toast(`Claude needs ${key}`)
-    return { result: `Asked the user to set ${key} in ${file} in the /env pane. ${wait}` }
+    return { result: `Asked the user to set ${key} in ${target.label} in the /env pane. ${wait}` }
   })
 
   on('tool.call', { tool: 'mcp__env__generate' }, async ($, e) => {
     const input = e as unknown as Record<string, unknown>
     const key = String(input.key ?? '')
     if (!KEY_NAME.test(key)) return { result: `"${key}" is not a valid env key name.` }
-    const file = asFile(input.file) ?? (await defaultFile($))
+    const target = await fileOf($, input.file)
+    if ('error' in target) return { result: target.error }
+    const file = target.path
     const bytes = Math.min(128, Math.max(16, Number(input.bytes ?? 32) || 32))
     const format = input.format === 'hex' ? 'hex' : 'base64url'
     const lines = await load($, file)
@@ -544,18 +569,8 @@ export const register: Register = on => {
 
   on('tool.call', { tool: 'mcp__env__copy' }, async ($, e) => {
     const input = e as unknown as Record<string, unknown>
-    const git = async (...args: string[]) => {
-      const ran = await $.process.run(['git', ...args]).catch(() => null)
-      return ran?.exitCode === 0 ? ran.stdout.trim() : ''
-    }
-    const isPath = [input.from, input.to].some(value => typeof value === 'string' && value.includes('/'))
-    // Only a path needs git: where the session sits, and which worktrees exist
-    const root = isPath ? await git('rev-parse', '--show-toplevel') : ''
-    const prefix = isPath ? await git('rev-parse', '--show-prefix') : ''
-    const cwd = prefix ? `${root}/${prefix.replace(/\/$/, '')}` : root
-    const trees = isPath ? worktree.parseWorktrees(await git('worktree', 'list', '--porcelain')) : []
-    const from = worktree.resolve(input.from, cwd, trees)
-    const to = worktree.resolve(input.to, cwd, trees)
+    const from = await place($, input.from)
+    const to = await place($, input.to)
     if ('error' in from) return { result: from.error }
     if ('error' in to) return { result: to.error }
     if (from.path === to.path) return { result: 'from and to are the same file.' }
@@ -597,8 +612,9 @@ export const register: Register = on => {
   on('tool.call', { tool: 'mcp__env__remove' }, async ($, e) => {
     const input = e as unknown as Record<string, unknown>
     const key = String(input.key ?? '')
-    const file = asFile(input.file)
-    if (!file) return { result: 'file must be an env file.' }
+    const target = await place($, input.file)
+    if ('error' in target) return { result: target.error }
+    const file = target.path
     const lines = await load($, file)
     if (env.get(lines, key) === undefined) return { result: `${key} is not in ${file}.` }
     await save($, file, env.commentOut(lines, key, `removed by Claude; uncomment to restore`))
@@ -609,7 +625,9 @@ export const register: Register = on => {
     const input = e as unknown as Record<string, unknown>
     const plan = push.check(input.argv, input.stdin)
     if ('error' in plan) return { result: plan.error }
-    const file = asFile(input.file) ?? (await defaultFile($))
+    const target = await fileOf($, input.file)
+    if ('error' in target) return { result: target.error }
+    const file = target.path
     const cli = plan.argv[0] ?? ''
 
     const lines = await load($, file)
@@ -662,7 +680,9 @@ export const register: Register = on => {
     const input = e as unknown as Record<string, unknown>
     const plan = pull.check(input.argv, input.key, input.keys)
     if ('error' in plan) return { result: plan.error }
-    const file = asFile(input.file) ?? (await defaultFile($))
+    const target = await fileOf($, input.file)
+    if ('error' in target) return { result: target.error }
+    const file = target.path
     const cli = plan.argv[0] ?? ''
     const command = push.shown({ argv: plan.argv, keys: [] })
     const login = `If ${cli} isn't logged in or linked, ask the user to run \`! ${cli} login\` (or link the project) and try again.`
