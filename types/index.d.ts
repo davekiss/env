@@ -23,6 +23,7 @@ declare module 'claude-code' {
       rev: number
       flash: string | null
       isWaiting: boolean
+      allowed: string[]
     }
   }
 }

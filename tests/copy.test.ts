@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import * as env from '../hooks/dotenv'
 import * as worktree from '../hooks/worktree'
-import { FEATURE, MAIN, repo } from './repo'
+import { FEATURE, MAIN, far, repo } from './repo'
 
 const SOURCE = '# Stripe\nSTRIPE_KEY=sk_live_main1234567\nPORT=3000\n'
 
@@ -38,13 +38,13 @@ describe('copy into another worktree', () => {
     expect(files[`${FEATURE}/.env`]).toBe('PORT=3000\n')
   })
 
-  test('a folder that is not a worktree root, or a template, is refused and nothing is written', async ($, on) => {
-    const files = repo(on, { [`${MAIN}/.env.local`]: SOURCE })
+  test("a folder that is not a worktree root the user won't allow, or a template, is refused and nothing is written", async ($, on) => {
+    const files = repo(on, { [`${MAIN}/.env.local`]: SOURCE }, far({}, "Don't allow"))
     const before = Object.keys(files).length
 
     for (const to of ['/tmp/.env.local', '../app-feature/packages/.env.local', '.env.example']) {
       const res = await $.tool.call(copy({ to }))
-      expect(String(res.result)).toMatch(/not the root|template/)
+      expect(String(res.result)).toMatch(/declined|template/)
     }
     expect(Object.keys(files).length).toBe(before)
   })

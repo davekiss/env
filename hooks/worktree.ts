@@ -27,7 +27,9 @@ export type Place = { path: string; label: string }
 
 // A bare name is a file in the session's own project root, as before. A path
 // must end in an env file name and sit at the root of a known worktree.
-export function resolve(value: unknown, cwd: string, worktrees: string[]): Place | { error: string } {
+// A path that is fine except for sitting outside every worktree carries
+// `outside`, so copy can ask the user about that folder instead
+export function resolve(value: unknown, cwd: string, worktrees: string[]): Place | { error: string; outside?: string } {
   if (typeof value !== 'string' || value.trim() === '') return { error: 'Name an env file by its file name, or by a path to one in another worktree.' }
   const raw = value.trim()
   if (!raw.includes('/')) {
@@ -39,7 +41,7 @@ export function resolve(value: unknown, cwd: string, worktrees: string[]): Place
   if (!isEnvFile(name)) return { error: `"${raw}" is not an env file.` }
   if (!worktrees.includes(dir)) {
     const known = worktrees.length > 0 ? ` Worktrees: ${worktrees.join(', ')}` : ''
-    return { error: `${dir} is not the root of one of this repo's git worktrees, so env won't write there.${known}` }
+    return { error: `${dir} is not the root of one of this repo's git worktrees, so env won't write there.${known}`, outside: full }
   }
   return { path: full, label: dir === cwd ? name : full }
 }

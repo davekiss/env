@@ -6,6 +6,7 @@ import * as env from './dotenv'
 import { basename, bashReason, grepReason, isProtectedPath } from './guard'
 import * as pull from './pull'
 import * as push from './push'
+import * as remote from './remote'
 import * as worktree from './worktree'
 
 const PANE = 'env'
@@ -23,6 +24,8 @@ const flash = atom({ plugin: 'env', key: 'flash' } as const, null as string | nu
 // The pane is open but the surface hasn't placed it (opened unasked on a
 // narrow terminal), so the request card draws above the prompt instead
 const isWaiting = atom({ plugin: 'env', key: 'isWaiting' } as const, false)
+// Hosts and folders outside the worktrees the user has let copy reach
+const allowed = atom({ plugin: 'env', key: 'allowed' } as const, [] as string[])
 
 const KEY_NAME = /^[A-Za-z_][A-Za-z0-9_.-]*$/
 
@@ -93,7 +96,7 @@ async function defaultFile($: Engine): Promise<string> {
 
 // An env file name in the project root, or a path to one at the root of
 // another of this repo's worktrees
-async function place($: Engine, value: unknown): Promise<worktree.Place | { error: string }> {
+async function place($: Engine, value: unknown): Promise<worktree.Place | { error: string; outside?: string }> {
   if (typeof value !== 'string' || !value.includes('/')) return worktree.resolve(value, '', [])
   const git = async (...args: string[]) => {
     const ran = await $.process.run(['git', ...args]).catch(() => null)
@@ -103,6 +106,61 @@ async function place($: Engine, value: unknown): Promise<worktree.Place | { erro
   const prefix = await git('rev-parse', '--show-prefix')
   const cwd = prefix ? `${root}/${prefix.replace(/\/$/, '')}` : root
   return worktree.resolve(value, cwd, worktree.parseWorktrees(await git('worktree', 'list', '--porcelain')))
+}
+
+// Where copy reads or writes: a file place() accepts, a file in a folder
+// outside the worktrees, or host:path over ssh. The last two need the user's
+// say-so, once per folder or host.
+type Spot = worktree.Place & { host?: string }
+
+async function spot($: Engine, value: unknown): Promise<Spot | { error: string }> {
+  const far = remote.parse(value)
+  if (far && 'error' in far) return far
+  if (far) {
+    const label = `${far.host}:${far.path}`
+    const error = await allow($, far.host, `Let env copy env files to and from ${far.host} over ssh?`)
+    return error ? { error } : { ...far, label }
+  }
+  const near = await place($, value)
+  if (!('error' in near) || !near.outside) return near
+  const dir = near.outside.slice(0, near.outside.lastIndexOf('/')) || '/'
+  const error = await allow($, dir, `Let env copy env files to and from ${dir}? It is not one of this repo's worktrees.`)
+  return error ? { error } : { path: near.outside, label: near.outside }
+}
+
+async function allow($: Engine, where: string, question: string): Promise<string | undefined> {
+  if ((await read($, allowed)).includes(where)) return undefined
+  const yes = 'Allow'
+  const answer = await $.ui.ask(question, { header: 'env', options: [yes, "Don't allow"] }).catch(() => null)
+  if (answer !== yes) return `The user declined to let env reach ${where}.`
+  await update($, allowed, list => [...list, where])
+  return undefined
+}
+
+async function readSpot($: Engine, at: Spot): Promise<{ lines: env.Line[]; exists: boolean } | { error: string }> {
+  if (!at.host) return { lines: await load($, at.path), exists: await $.fs.exists(at.path) }
+  const ran = await ssh($, at, remote.reader({ host: at.host, path: at.path }))
+  if ('error' in ran) return ran
+  if (ran.exitCode === remote.MISSING) return { lines: [], exists: false }
+  return { lines: env.parse(ran.stdout), exists: true }
+}
+
+async function writeSpot($: Engine, at: Spot, lines: env.Line[]): Promise<string | undefined> {
+  if (!at.host) return void (await save($, at.path, lines))
+  const ran = await ssh($, at, remote.writer({ host: at.host, path: at.path }), env.serialize(lines))
+  return 'error' in ran ? ran.error : undefined
+}
+
+// BatchMode makes ssh fail instead of waiting on a password or host key prompt
+async function ssh($: Engine, at: Spot, argv: string[], stdin?: string) {
+  const help = `Ask the user to run \`! ssh ${at.host} true\` to check the connection, then try again.`
+  const ran = await $.process.run(argv, { stdin, timeoutMs: 60_000 }).catch((error: unknown) => ({ error: String(error) }))
+  if ('error' in ran) return { error: `ssh could not run: ${env.scrub(ran.error, index)}. ${help}` }
+  if (ran.exitCode !== 0 && ran.exitCode !== remote.MISSING) {
+    return { error: `ssh to ${at.host} exited ${ran.exitCode}, so nothing was copied. ${env.scrub(ran.stderr.trim(), index)}\n${help}` }
+  }
+  if (ran.isStdoutTruncated) return { error: `${at.label} is too large to copy.` }
+  return ran
 }
 
 // The file a tool names, or the default when it names none. A named file
@@ -324,17 +382,19 @@ export const register: Register = on => {
       name: 'copy',
       description:
         'Copies env values without reading them: one key (optionally renamed with as), or with no key ' +
-        "the whole file. from and to are env file names in this project's root (.env.local), or paths " +
+        "the whole file. from and to are env file names in this project's root (.env.local), paths " +
         "to an env file at the root of another of this repo's git worktrees (../app-feature/.env.local), " +
-        'e.g. to set up a new worktree. A whole-file copy into a file that does not exist yet copies it ' +
+        'e.g. to set up a new worktree, or an env file on another machine over ssh, named as scp names it ' +
+        '(box:~/app/.env, deploy@box:/srv/app/.env.production). A path to any other folder, or another ' +
+        'machine, asks the user once to allow it. One side must be local. A whole-file copy into a file that does not exist yet copies it ' +
         "as-is, comments included; into an existing file, keys the target already has with a different " +
         'value are kept unless overwrite is true.',
       inputSchema: {
         type: 'object',
         properties: {
           key: { type: 'string', description: 'One key to copy. Omit to copy every key.' },
-          from: { type: 'string', description: 'An env file name, or a path to one in another worktree' },
-          to: { type: 'string', description: 'An env file name, or a path to one in another worktree' },
+          from: { type: 'string', description: 'An env file name, a path to one, or host:path over ssh' },
+          to: { type: 'string', description: 'An env file name, a path to one, or host:path over ssh' },
           as: { type: 'string', description: 'Key name in the target file, with key. Default: same key.' },
           overwrite: { type: 'boolean', description: 'Whole-file copy only: replace keys the target sets differently' },
         },
@@ -569,36 +629,48 @@ export const register: Register = on => {
 
   on('tool.call', { tool: 'mcp__env__copy' }, async ($, e) => {
     const input = e as unknown as Record<string, unknown>
-    const from = await place($, input.from)
-    const to = await place($, input.to)
-    if ('error' in from) return { result: from.error }
+    if (remote.parse(input.from) && remote.parse(input.to)) {
+      return { result: 'from and to are both on other machines. Copy through a local env file instead, so the scrubber knows the values.' }
+    }
+    const to = await spot($, input.to)
     if ('error' in to) return { result: to.error }
-    if (from.path === to.path) return { result: 'from and to are the same file.' }
     if (env.isTemplate(basename(to.path))) {
       return { result: `${to.label} is a template, usually committed, so env won't copy values into it.` }
     }
+    const from = await spot($, input.from)
+    if ('error' in from) return { result: from.error }
+    if (from.path === to.path && from.host === to.host) return { result: 'from and to are the same file.' }
 
-    const source = await load($, from.path)
+    const source = await readSpot($, from)
+    if ('error' in source) return { result: source.error }
+    const target = await readSpot($, to)
+    if ('error' in target) return { result: target.error }
+
     if (input.key !== undefined) {
       const key = String(input.key)
-      const target = String(input.as ?? key)
-      if (!KEY_NAME.test(target)) return { result: `"${target}" is not a valid env key name.` }
-      const value = env.get(source, key)
+      const as = String(input.as ?? key)
+      if (!KEY_NAME.test(as)) return { result: `"${as}" is not a valid env key name.` }
+      const value = env.get(source.lines, key)
       if (value === undefined) return { result: `${key} is not set in ${from.label}.` }
-      await save($, to.path, env.set(await load($, to.path), target, value))
-      return { result: `Copied ${key} from ${from.label} to ${to.label}${target === key ? '' : ` as ${target}`}.` }
+      const failed = await writeSpot($, to, env.set(target.lines, as, value))
+      if (failed) return { result: failed }
+      return { result: `Copied ${key} from ${from.label} to ${to.label}${as === key ? '' : ` as ${as}`}.` }
     }
 
-    const keys = env.entries(source).map(entry => entry.key)
+    const keys = env.entries(source.lines).map(entry => entry.key)
     if (keys.length === 0) return { result: `${from.label} has no keys to copy.` }
-    if (!(await $.fs.exists(to.path))) {
-      await save($, to.path, source)
+    if (!target.exists) {
+      const failed = await writeSpot($, to, source.lines)
+      if (failed) return { result: failed }
       $.ui.toast(`Copied ${from.label} to ${to.label}`)
       return { result: `Copied ${from.label} to ${to.label} as-is: ${keys.join(', ')}. Values not shown.` }
     }
-    const values = Object.fromEntries(env.entries(source).map(entry => [entry.key, entry.value]))
-    const merged = pull.merge(await load($, to.path), values, input.overwrite === true)
-    if (merged.added.length + merged.changed.length > 0) await save($, to.path, merged.lines)
+    const values = Object.fromEntries(env.entries(source.lines).map(entry => [entry.key, entry.value]))
+    const merged = pull.merge(target.lines, values, input.overwrite === true)
+    if (merged.added.length + merged.changed.length > 0) {
+      const failed = await writeSpot($, to, merged.lines)
+      if (failed) return { result: failed }
+    }
     const report = [`Copied ${from.label} into ${to.label}, values not shown:`]
     if (merged.added.length > 0) report.push(`  set: ${merged.added.join(', ')}`)
     if (merged.changed.length > 0) report.push(`  replaced: ${merged.changed.join(', ')}`)
