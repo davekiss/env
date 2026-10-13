@@ -97,6 +97,10 @@ async function defaultFile($: Engine): Promise<string> {
 // An env file name in the project root, or a path to one at the root of
 // another of this repo's worktrees
 async function place($: Engine, value: unknown): Promise<worktree.Place | { error: string; outside?: string }> {
+  if (typeof value === 'string' && value.trim().startsWith('~/')) {
+    const home = await $.env.get('HOME')
+    if (home) value = `${home}${value.trim().slice(1)}`
+  }
   if (typeof value !== 'string' || !value.includes('/')) return worktree.resolve(value, '', [])
   const git = async (...args: string[]) => {
     const ran = await $.process.run(['git', ...args]).catch(() => null)
@@ -393,8 +397,8 @@ export const register: Register = on => {
         type: 'object',
         properties: {
           key: { type: 'string', description: 'One key to copy. Omit to copy every key.' },
-          from: { type: 'string', description: 'An env file name, a path to one, or host:path over ssh' },
-          to: { type: 'string', description: 'An env file name, a path to one, or host:path over ssh' },
+          from: { type: 'string', description: 'An env file name, a path to one (~/ for the home folder), or host:path over ssh' },
+          to: { type: 'string', description: 'An env file name, a path to one (~/ for the home folder), or host:path over ssh' },
           as: { type: 'string', description: 'Key name in the target file, with key. Default: same key.' },
           overwrite: { type: 'boolean', description: 'Whole-file copy only: replace keys the target sets differently' },
         },

@@ -93,6 +93,14 @@ describe('copy to a folder outside the worktrees', () => {
     expect(world.asked[0]).toContain(OUTSIDE)
   })
 
+  test('a path starting with ~/ is taken from the home folder', async ($, on) => {
+    const files = repo(on, { [`${MAIN}/.env.local`]: SOURCE })
+    on('env.get', () => ({ value: '/outside' }) as never)
+
+    await $.tool.call(copy({ from: '.env.local', to: '~/app/.env' }))
+    expect(files[`${OUTSIDE}/.env`]).toBe(SOURCE)
+  })
+
   test('is refused when the user says no', async ($, on) => {
     const world = far({}, "Don't allow")
     const files = repo(on, { [`${MAIN}/.env.local`]: SOURCE }, world)
